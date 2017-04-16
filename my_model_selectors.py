@@ -1,4 +1,5 @@
 import math
+from operator import itemgetter
 import statistics
 import warnings
 
@@ -74,11 +75,37 @@ class SelectorBIC(ModelSelector):
 
         :return: GaussianHMM object
         """
+
+        def compute_bic(logL, num_components):
+            # The Baum-Welch Algorithm is estimating pi, A, B parameters of the HMM
+            # pi: The initial state distribution has "num_components" values to estimate.
+            # A: The state transition matrix has "num_components^2" values to estimate.
+            # B: The emission probablity pdf has "2*num_components" values to estimate.
+            num_parameters = (num_components-1) + num_components * (num_components - 1) + 2 * num_components
+            return -2 * logL + num_parameters * np.log(len(self.lengths))
+
         warnings.filterwarnings("ignore", category=DeprecationWarning)
 
-        # TODO implement model selection based on BIC scores
-        raise NotImplementedError
+        # Dictionary that will store mapping between model size and tuple of (model, BIC score)
+        results_dict = {}
 
+        # Loop over different model sizes and evaluate CV log-Likelihood.
+        for num_components in range(self.min_n_components, self.max_n_components + 1):
+            # Train model
+            model  = self.base_model(num_components)
+            # If training successful and we can score model then record model BIC.
+            if model:
+                try:
+                    logL = model.score(self.X, self.lengths)
+                    results_dict[num_components] = (model, compute_bic(logL, num_components))
+                except Exception as e:
+                    if self.verbose:
+                        print("failure to score {} with {} states".format(self.this_word, num_components))
+
+            # Find and return model with lowest BIC.
+            if len(results_dict):
+                model, _ = sorted(results_dict.items(), key=lambda x: x[1][1], reverse=False)[0][1]
+                return model
 
 class SelectorDIC(ModelSelector):
     ''' select best model based on Discriminative Information Criterion
@@ -93,7 +120,34 @@ class SelectorDIC(ModelSelector):
         warnings.filterwarnings("ignore", category=DeprecationWarning)
 
         # TODO implement model selection based on DIC scores
-        raise NotImplementedError
+        # Dictionary that will store mapping between model size and tuple of (model, BIC score)
+        results_dict = {}
+
+        # Loop over different model sizes and evaluate CV log-Likelihood.
+        for num_components in range(self.min_n_components, self.max_n_components + 1):
+            # Train model
+            model  = self.base_model(num_components)
+            # If training successful and we can score model then record model BIC.
+            if model:
+                logL_this_word, logL_other_words, num_other_words = [0., 0., 0.]
+                for word, XLength in self.hwords.items():
+                    try:
+                        logL = model.score(XLength[0], XLength[1])
+                        if word == self.this_word:
+                            logL_this_word += logL
+                        else:
+                            logL_other_words += logL
+                            num_other_words += 1
+                    except Exception as e:
+                        if self.verbose:
+                            print("failure to score {} with {} states".format(self.this_word, num_components))
+                if num_other_words > 0:
+                    results_dict[num_components] = (model, logL_this_word - logL_other_words/num_other_words)
+
+        # Find and return model with largest DIC.
+        if len(results_dict) > 0:
+            model, _ = sorted(results_dict.items(), key=lambda x: x[1][1], reverse=True)[0][1]
+            return model
 
 
 class SelectorCV(ModelSelector):
@@ -103,6 +157,48 @@ class SelectorCV(ModelSelector):
 
     def select(self):
         warnings.filterwarnings("ignore", category=DeprecationWarning)
+        # Get all word sequences.
+        word_sequences = self.words[self.this_word]
 
-        # TODO implement model selection using CV
-        raise NotImplementedError
+        # Do 3-Fold cross validation if we have enough samples
+        if len(word_sequences) > 3:
+            n_splits = 3
+        else:
+            n_splits = 2
+        split_method = KFold(n_splits=n_splits)
+
+        # Dictionary that will store mapping between model size and CV loglikelihood.
+        results_dict = {}
+
+        # Loop over different model sizes and evaluate CV log-Likelihood.
+        for num_components in range(self.min_n_components, self.max_n_components+1):
+
+            # For each model size loop over the different CV train/test folds.
+            log_likelihoods = []
+            for cv_train_idx, cv_test_idx in split_method.split(word_sequences):
+
+                # Get current training set
+                self.X, self.lengths = combine_sequences(cv_train_idx, word_sequences)
+
+                # Train model
+                model = self.base_model(num_components)
+
+                # If training succeeded try to score the test set and record the log-likelihood.
+                if model:
+                    try:
+                        X_test, test_lengths = combine_sequences(cv_test_idx, word_sequences)
+                        logL = model.score(X_test, test_lengths)
+                        log_likelihoods.append(logL)
+                    except:
+                        if self.verbose:
+                            print("failure to score {} with {} states".format(self.this_word, num_components))
+
+            # For current model size, average the log-likelihood scores across folds with successful training and test.
+            if len(log_likelihoods):
+                results_dict[num_components] = np.mean(log_likelihoods)
+
+        # Find model size with largest CV log-likelihood and return after retraining on all word sequences.
+        if len(results_dict):
+            best_model_size = sorted(results_dict.items(), key=itemgetter(1), reverse=True)[0][0]
+            self.X, self.lengths = self.hwords[self.this_word]
+            return self.base_model(best_model_size)
