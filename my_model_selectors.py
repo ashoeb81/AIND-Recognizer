@@ -88,8 +88,9 @@ class SelectorBIC(ModelSelector):
             # To evaluate the BIC, we need the number of parameters in our model.  A Gaussian HMM parameters include
             # P: The initial state distribution which has "num_components" values to estimate.
             # A: The state transition matrix which has "num_components * (num_components-1)" values to estimate.
-            # B: The emission probability pdf has "2*num_components" when the covariance is diagonal.
-            num_parameters = (num_components-1) + num_components * (num_components - 1) + 2 * num_components
+            # B: The emission probability pdf has "2 * num_features * num_components" when the covariance is diagonal.
+            # When summed together we get the simplified expression below
+            num_parameters = num_components**2  + 2 * len(self.X[0]) * num_components
             return -2 * logL + num_parameters * np.log(len(self.lengths))
 
         warnings.filterwarnings("ignore", category=DeprecationWarning)
